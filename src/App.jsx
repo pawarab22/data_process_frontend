@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Layout, Database, Plus, RefreshCw, Trash2, PieChart, Filter, Group, Calculator, X } from 'lucide-react';
+import { Layout, Database, Plus, RefreshCw, Trash2, PieChart, Filter, Group, Calculator, X, Search, ChevronLeft, ChevronRight } from 'lucide-react';
 import { getDatasets, getDatasetById, queryDataset, uploadDataset, deleteDataset } from './services/api';
 import './index.css';
 
@@ -13,6 +13,11 @@ function App() {
   const [activeTab, setActiveTab] = useState('dashboard'); // 'dashboard' or 'query'
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [success, setSuccess] = useState(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [previewPage, setPreviewPage] = useState(1);
+  const [queryPage, setQueryPage] = useState(1);
+  const ROWS_PER_PAGE = 10;
 
   // Query State
   const [queryOptions, setQueryOptions] = useState({
@@ -28,9 +33,9 @@ function App() {
 
   useEffect(() => {
     if (selectedDatasetId) {
-      fetchDatasetDetails(selectedDatasetId);
+      fetchDatasetDetails(selectedDatasetId, previewPage, searchTerm);
     }
-  }, [selectedDatasetId]);
+  }, [selectedDatasetId, previewPage, searchTerm]);
 
   const fetchDatasets = async () => {
     try {
@@ -44,14 +49,17 @@ function App() {
     }
   };
 
-  const fetchDatasetDetails = async (id) => {
+  const fetchDatasetDetails = async (id, page = 1, search = "") => {
     setLoading(true);
     try {
-      const { data } = await getDatasetById(id);
+      const { data } = await getDatasetById(id, page, ROWS_PER_PAGE, search);
       setCurrentDataset(data);
-      // Reset query when switching dataset
-      setQueryResult(data.records);
-      setQueryOptions({ filters: [], groupings: [], aggregations: [] });
+      // Reset query when completely switching dataset root ID
+      if (currentDataset?.dataset?.id !== id) {
+          setQueryResult(data.records);
+          setQueryOptions({ filters: [], groupings: [], aggregations: [] });
+          setQueryPage(1);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -61,7 +69,18 @@ function App() {
 
   const handleUpload = async (e) => {
     e.preventDefault();
-    if (!uploadFile) return;
+    if (!uploadFile) {
+        setError("Please select a file to upload.");
+        return;
+    }
+
+    // Edge Case: Invalid file format validation
+    const validExtensions = ['.csv', '.json'];
+    const fileName = uploadFile.name.toLowerCase();
+    if (!validExtensions.some(ext => fileName.endsWith(ext))) {
+       setError("Invalid file format. Only CSV and JSON files are supported.");
+       return;
+    }
 
     const formData = new FormData();
     formData.append('file', uploadFile);
@@ -73,6 +92,7 @@ function App() {
       setIsUploading(false);
       setUploadFile(null);
       setDatasetName("");
+      setSuccess("Your dataset has been successfully processed and is ready for analysis!");
       await fetchDatasets();
     } catch (err) {
       setError(err.message);
@@ -95,10 +115,24 @@ function App() {
 
   const handleRunQuery = async () => {
     if (!selectedDatasetId) return;
+
+    // Edge Case: Invalid or incomplete query parameters
+    if (queryOptions.filters.some(f => !f.field || !f.value || !f.operator)) {
+        setError("Invalid query: All filters must have a Field, Operator, and Value.");
+        return;
+    }
+    if (queryOptions.aggregations.some(a => !a.field || !a.op)) {
+        setError("Invalid query: All aggregations must have a Field and Operation selected.");
+        return;
+    }
+
     setLoading(true);
     try {
-      const { data } = await queryDataset(selectedDatasetId, queryOptions);
-      setQueryResult(data.data);
+      const { data } = await queryDataset(selectedDatasetId, { ...queryOptions, page: queryPage, limit: ROWS_PER_PAGE });
+      // Depending on backend structure, data.data might hold the array, 
+      // and data.pagination holds the metadata.
+      setQueryResult(data.data || data); // handle arrays dynamically
+      setCurrentDataset(prev => ({ ...prev, queryPagination: data.pagination }));
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -107,10 +141,35 @@ function App() {
     }
   };
 
-  // Extract columns for the dynamic query builder
-  const columns = currentDataset?.records?.length > 0 
-    ? Object.keys(currentDataset.records[0]) 
-    : [];
+  useEffect(() => {
+     // Auto-fetch next block if a query is already actively displaying results
+     if (queryResult) {
+        handleRunQuery();
+     }
+  }, [queryPage]);
+
+  // Edge Case: Handling inconsistent/missing fields and empty datasets
+  const getColumns = () => {
+    if (!currentDataset?.records || currentDataset.records.length === 0) return [];
+    const keys = new Set();
+    // Sample first 50 rows to capture sporadically missing fields
+    const sample = currentDataset.records.slice(0, 50);
+    sample.forEach(row => {
+       if (row && typeof row === 'object') {
+           Object.keys(row).forEach(k => keys.add(k));
+       }
+    });
+    return Array.from(keys);
+  };
+  const columns = getColumns();
+
+  // Server-Side Preview Pagination
+  const previewTotalPages = currentDataset?.pagination?.totalPages || 1;
+  const previewTotalRecords = currentDataset?.pagination?.totalRecords || (currentDataset?.records?.length || 0);
+
+  // Server-Side Results Pagination
+  const resultsTotalPages = currentDataset?.queryPagination ? currentDataset.queryPagination.totalPages : previewTotalPages;
+  const resultsTotalRecords = currentDataset?.queryPagination ? currentDataset.queryPagination.totalRecords : previewTotalRecords;
 
   return (
     <div className="app-container">
@@ -134,33 +193,25 @@ function App() {
                 onClick={() => setSelectedDatasetId(ds.id)}
               >
                 <Database size={18} />
-                <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{ds.name}</span>
-                {selectedDatasetId === ds.id && <Trash2 size={14} className="danger" onClick={(e) => { e.stopPropagation(); handleDelete(ds.id); }} />}
+                <span style={{ flex: 1, wordBreak: 'break-all' }} title={ds.name}>{ds.name}</span>
+                {selectedDatasetId === ds.id && <Trash2 size={16} className="danger" onClick={(e) => { e.stopPropagation(); handleDelete(ds.id); }} style={{ flexShrink: 0 }} />}
               </div>
             ))}
           </div>
         </div>
 
-        <div className="nav-item">
-          <Layout size={18} /> <span>Settings</span>
-        </div>
       </aside>
 
       {/* Main Content */}
       <main className="main-content">
-        {error && (
-            <div className="card" style={{ borderColor: 'var(--danger)', color: 'var(--danger)', display: 'flex', justifyContent: 'space-between' }}>
-                {error}
-                <X size={18} onClick={() => setError(null)} style={{ cursor: 'pointer' }} />
-            </div>
-        )}
+
 
         {selectedDatasetId ? (
           <>
             <header style={{ marginBottom: '2rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div>
                 <h1 style={{ fontSize: '2rem', fontWeight: 700 }}>{currentDataset?.dataset?.name}</h1>
-                <p style={{ color: 'var(--text-muted)' }}>{currentDataset?.records?.length} records • Type: {currentDataset?.dataset?.type?.toUpperCase()}</p>
+                <p style={{ color: 'var(--text-muted)' }}>{previewTotalRecords} records • Type: {currentDataset?.dataset?.type?.toUpperCase()}</p>
               </div>
               <div style={{ display: 'flex', gap: '1rem' }}>
                 <button className={`btn ${activeTab === 'dashboard' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('dashboard')}>
@@ -175,7 +226,13 @@ function App() {
             {activeTab === 'dashboard' ? (
               <section className="animate-fade">
                 <div className="card">
-                   <h3 style={{ marginBottom: '1rem' }}>Preview (First 100 rows)</h3>
+                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '1rem' }}>
+                     <h3 style={{ margin: 0 }}>Preview (Searchable)</h3>
+                     <div style={{ position: 'relative', width: '300px', maxWidth: '100%' }}>
+                        <Search size={16} color="var(--text-muted)" style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)' }} />
+                        <input type="text" placeholder="Search dataset..." style={{ paddingLeft: '36px', width: '100%' }} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                     </div>
+                   </div>
                    <div className="data-table-container">
                      {currentDataset?.records?.length > 0 ? (
                        <table>
@@ -185,7 +242,7 @@ function App() {
                            </tr>
                          </thead>
                          <tbody>
-                           {currentDataset.records.slice(0, 10).map((row, i) => (
+                           {currentDataset?.records?.map((row, i) => (
                              <tr key={i}>
                                {columns.map(col => <td key={col}>{typeof row[col] === 'object' && row[col] !== null ? JSON.stringify(row[col]) : String(row[col] ?? '')}</td>)}
                              </tr>
@@ -194,6 +251,22 @@ function App() {
                        </table>
                      ) : <p>No records found.</p>}
                    </div>
+
+                   {currentDataset?.records?.length > 0 && (
+                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', padding: '1rem 0', borderTop: '1px solid var(--border)' }}>
+                       <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                         Showing {(previewPage - 1) * ROWS_PER_PAGE + 1} to {Math.min(previewPage * ROWS_PER_PAGE, previewTotalRecords)} of {previewTotalRecords} entries
+                       </span>
+                       <div style={{ display: 'flex', gap: '0.5rem' }}>
+                         <button className="btn btn-secondary" style={{ padding: '0.5rem' }} disabled={previewPage === 1} onClick={() => setPreviewPage(p => p - 1)}>
+                           <ChevronLeft size={16} />
+                         </button>
+                         <button className="btn btn-secondary" style={{ padding: '0.5rem' }} disabled={previewPage >= previewTotalPages} onClick={() => setPreviewPage(p => p + 1)}>
+                           <ChevronRight size={16} />
+                         </button>
+                       </div>
+                     </div>
+                   )}
                 </div>
               </section>
             ) : (
@@ -335,14 +408,31 @@ function App() {
                               </tr>
                            </thead>
                            <tbody>
-                              {queryResult.map((row, i) => (
+                              {queryResult?.map((row, i) => (
                                  <tr key={i}>
                                     {Object.values(row).map((v, idx) => <td key={idx}>{typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v ?? '')}</td>)}
                                  </tr>
                               ))}
                            </tbody>
                         </table>
+                        {(!queryResult || queryResult.length === 0) && <p style={{ padding: '1rem' }}>No results found.</p>}
                      </div>
+
+                     {queryResult?.length > 0 && (
+                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '1rem', padding: '1rem 0', borderTop: '1px solid var(--border)' }}>
+                         <span style={{ fontSize: '0.875rem', color: 'var(--text-muted)' }}>
+                           Showing {(queryPage - 1) * ROWS_PER_PAGE + 1} to {Math.min(queryPage * ROWS_PER_PAGE, resultsTotalRecords)} of {resultsTotalRecords} entries
+                         </span>
+                         <div style={{ display: 'flex', gap: '0.5rem' }}>
+                           <button className="btn btn-secondary" style={{ padding: '0.5rem' }} disabled={queryPage === 1} onClick={() => { setQueryPage(p => p - 1); setTimeout(handleRunQuery, 0); }}>
+                             <ChevronLeft size={16} />
+                           </button>
+                           <button className="btn btn-secondary" style={{ padding: '0.5rem' }} disabled={queryPage >= resultsTotalPages} onClick={() => { setQueryPage(p => p + 1); setTimeout(handleRunQuery, 0); }}>
+                             <ChevronRight size={16} />
+                           </button>
+                         </div>
+                       </div>
+                     )}
                   </div>
                 )}
               </section>
@@ -402,6 +492,46 @@ function App() {
                     {loading ? "Processing..." : "Ingest Data"}
                  </button>
               </form>
+           </div>
+        </div>
+      )}
+
+      {/* Error Modal Overlay */}
+      {error && (
+        <div className="animate-fade" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+           <div className="card" style={{ width: '450px', maxWidth: '90%', borderTop: '4px solid var(--danger)', padding: '2rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', color: 'var(--danger)' }}>
+                 <div style={{ backgroundColor: '#fee2e2', padding: '0.5rem', borderRadius: '50%', display: 'flex' }}>
+                   <X size={20} style={{ strokeWidth: 3 }} />
+                 </div>
+                 <h3 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.25rem' }}>Action Required</h3>
+              </div>
+              <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', lineHeight: '1.5' }}>
+                 {error}
+              </p>
+              <button className="btn btn-secondary" style={{ width: '100%' }} onClick={() => setError(null)}>
+                 Dismiss
+              </button>
+           </div>
+        </div>
+      )}
+
+      {/* Success Modal Overlay */}
+      {success && (
+        <div className="animate-fade" style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0, 0, 0, 0.4)', zIndex: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+           <div className="card" style={{ width: '450px', maxWidth: '90%', borderTop: '4px solid var(--accent)', padding: '2rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginBottom: '1rem', color: 'var(--accent)' }}>
+                 <div style={{ backgroundColor: '#ccfbf1', padding: '0.5rem', borderRadius: '50%', display: 'flex' }}>
+                   <Database size={20} style={{ strokeWidth: 3 }} />
+                 </div>
+                 <h3 style={{ margin: 0, color: 'var(--text-main)', fontSize: '1.25rem' }}>Success!</h3>
+              </div>
+              <p style={{ color: 'var(--text-muted)', marginBottom: '2rem', lineHeight: '1.5' }}>
+                 {success}
+              </p>
+              <button className="btn btn-primary" style={{ width: '100%' }} onClick={() => setSuccess(null)}>
+                 Continue
+              </button>
            </div>
         </div>
       )}

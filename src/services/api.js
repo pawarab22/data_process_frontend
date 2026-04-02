@@ -15,7 +15,7 @@ api.interceptors.response.use(
 );
 
 export const getDatasets = () => api.get('/datasets');
-export const getDatasetById = (id) => api.get(`/datasets/${id}`);
+export const getDatasetById = (id, page = 1, limit = 20, search = "") => api.get(`/datasets/${id}`, { params: { page, limit, search } });
 export const uploadDataset = (formData) => api.post('/datasets/upload', formData, {
   headers: { 'Content-Type': 'multipart/form-data' },
 });
